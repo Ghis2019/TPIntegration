@@ -1,104 +1,93 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.IO;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Serialization;
-using System.Net;
-using System.Net.Http;
-using System.Text;
-using System.Data.Common;
 using System.Data.SqlClient;
-using System.Runtime.Serialization.Json;
-using System.Xml.Linq;
-using static System.Net.WebRequestMethods;
-
+using System.Net.Http;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
 
 namespace ConsoleApplication2
 {
     class Program
     {
-        private const String cs = @"Data Source=HUAWEI-NICKY;Initial Catalog=INSEE;Trusted_Connection=true";
-        //private const String cs = @"Data Source=HUAWEI-NICKY;Initial Catalog=INSEE;User=test;Password=MotdepAss3;TrustServerCertificate=True";
+        private const String cs = @"Data Source=GHISLAIN\SQLEXPRESS;Initial Catalog=INSE;Trusted_Connection=true";
         private const string baseURL = "https://geo.api.gouv.fr/communes/";
         private const string endurl = "?fields=&format=json";
 
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
-            readDataCommune();
+            await ReadDataCommune();
         }
-        private static void readDataCommune()
+
+        private static async Task ReadDataCommune()
         {
             List<Ville> villes = new List<Ville>();
             
-            using (SqlConnection myConnection = new SqlConnection(cs))
+            using (HttpClient client = new HttpClient())
+            using (HttpResponseMessage response = await client.GetAsync(baseURL + endurl))
             {
-                // On lit les communes de la base 
-                string oString = "Select * from Commune";
-                SqlCommand oCmd = new SqlCommand(oString, myConnection);
-                myConnection.Open();
-                using (SqlDataReader oReader = oCmd.ExecuteReader())
+                if (response.IsSuccessStatusCode)
                 {
-                    while (oReader.Read())
-                    {
-                        Ville city = new Ville();
-                        city.code = oReader["Code_commune_INSEE"].ToString();
-                        villes.Add(city);
-                    }
-                    
-                    myConnection.Close();
+                    string json = await response.Content.ReadAsStringAsync();
+                    villes = JsonConvert.DeserializeObject<List<Ville>>(json);
                 }
-
-                // pour chaque commune on intérroge l'api
-                foreach (Ville ville in villes)
+                else
                 {
-                    string uri = string.Concat(baseURL + ville.code + endurl);
-                    HttpWebRequest WebReq = (HttpWebRequest)WebRequest.Create(string.Format(uri));
+                    Console.WriteLine("Erreur de requête : " + response.StatusCode);
+                    return;
+                }
+            }
 
-                    WebReq.Method = "GET";
+            foreach (Ville ville in villes)
+            {
+                string uri = string.Concat(baseURL + ville.code + endurl);
 
-                    HttpWebResponse WebResp = (HttpWebResponse)WebReq.GetResponse();
-
-                    Console.WriteLine(WebResp.StatusCode);
-
-                    string jsonString;
-                    using (Stream stream = WebResp.GetResponseStream())   
+                using (HttpClient client = new HttpClient())
+                using (HttpResponseMessage response = await client.GetAsync(uri))
+                {
+                    if (response.IsSuccessStatusCode)
                     {
-                        // on utilise le stream avec son dispose - pour libérer des ressources non managées
+                        string json = await response.Content.ReadAsStringAsync();
+                        Ville item = JsonConvert.DeserializeObject<Ville>(json);
 
-                        StreamReader reader = new StreamReader(stream, System.Text.Encoding.UTF8);
-                        jsonString = reader.ReadToEnd();
+                        if (item.population == null)
+                        {
+                            item.population = "0";
+                        }
+
+                        try
+                        {
+                            using (SqlConnection connection = new SqlConnection(cs))
+                            {
+                                connection.Open();
+
+                                // Insérer la population dans la table de la base de données INSE
+                                string query = "UPDATE Commune SET population = @population WHERE Code_commune = @code";
+                                SqlCommand command = new SqlCommand(query, connection);
+                                command.Parameters.AddWithValue("@population", item.population);
+                                command.Parameters.AddWithValue("@code", item.code);
+
+                                int rowsAffected = command.ExecuteNonQuery();
+                                if (rowsAffected > 0)
+                                {
+                                    Console.WriteLine("Population de " + item.nom + " mise à jour.");
+                                }
+                                else
+                                {
+                                    Console.WriteLine("Aucune mise à jour pour la population de " + item.nom);
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("Erreur lors de l'insertion dans la base de données : " + ex.Message);
+                        }
                     }
-
-                    // on déserialise notre ville
-                    Ville item = JsonConvert.DeserializeObject<Ville>(jsonString);
-
-                    // si la population est null on met à zéro
-                    if (item.population == null)
+                    else
                     {
-                        item.population = "0";
+                        Console.WriteLine("Erreur de requête pour la ville " + ville.nom + " : " + response.StatusCode);
                     }
-                    myConnection.Open();
-
-                    // on insère la population dans la table commune
-                    try
-                    {
-                        SqlCommand command5 = new SqlCommand("update Commune " +
-                            "SET population = (@population) where [Code_commune_INSEE] = (@code)", myConnection);
-
-                        command5.Parameters.AddWithValue("@population", item.population);
-                        command5.Parameters.AddWithValue("@code", item.code);
-
-                        command5.ExecuteNonQuery();
-                        Console.WriteLine("population de "+item.nom + " à jour");
-
-                    }
-                    catch (SqlException ex)
-                    {
-                        Console.WriteLine(ex.ErrorCode);
-                    }
-                    myConnection.Close();
                 }
             }
         }
-    }
+    }    
 }
